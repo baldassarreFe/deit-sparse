@@ -71,6 +71,10 @@ def build_dataset(is_train, args):
         dataset = INatDataset(args.data_path, train=is_train, year=2019,
                               category=args.inat_category, transform=transform)
         nb_classes = dataset.nb_classes
+    elif args.data_set == 'FOLDER':
+        root = args.data_path
+        dataset = datasets.ImageFolder(root, transform=transform)
+        nb_classes = len(dataset.classes)
 
     return dataset, nb_classes
 

@@ -153,8 +153,8 @@ def get_args_parser():
     # Dataset parameters
     parser.add_argument('--data-path', default='/datasets01/imagenet_full_size/061417/', type=str,
                         help='dataset path')
-    parser.add_argument('--data-set', default='IMNET', choices=['CIFAR', 'IMNET', 'INAT', 'INAT19'],
-                        type=str, help='Image Net dataset path')
+    parser.add_argument('--data-set', default='IMNET', choices=['CIFAR', 'IMNET', 'INAT', 'INAT19', 'FOLDER'],
+                        type=str, help='dataset type')
     parser.add_argument('--inat-category', default='name',
                         choices=['kingdom', 'phylum', 'class', 'order', 'supercategory', 'family', 'genus', 'name'],
                         type=str, help='semantic granularity')
@@ -168,6 +168,7 @@ def get_args_parser():
     parser.add_argument('--start_epoch', default=0, type=int, metavar='N',
                         help='start epoch')
     parser.add_argument('--eval', action='store_true', help='Perform evaluation only')
+    parser.add_argument('--find_unused_parameters', action='store_true', help='DDP find unused parameters')
     parser.add_argument('--dist-eval', action='store_true', default=False, help='Enabling distributed evaluation')
     parser.add_argument('--num_workers', default=10, type=int)
     parser.add_argument('--pin-mem', action='store_true',
@@ -201,8 +202,13 @@ def main(args):
 
     cudnn.benchmark = True
 
-    dataset_train, args.nb_classes = build_dataset(is_train=True, args=args)
-    dataset_val, _ = build_dataset(is_train=False, args=args)
+    if not args.eval:
+        dataset_train, args.nb_classes = build_dataset(is_train=True, args=args)
+        dataset_val, _ = build_dataset(is_train=False, args=args)
+    else:
+        # Eval-only, use dummy dataset_train
+        dataset_val, args.nb_classes = build_dataset(is_train=False, args=args)
+        dataset_train = dataset_val
 
     if True:  # args.distributed:
         num_tasks = utils.get_world_size()
@@ -337,7 +343,8 @@ def main(args):
 
     model_without_ddp = model
     if args.distributed:
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
+        model = torch.nn.parallel.DistributedDataParallel(
+            model, device_ids=[args.gpu], find_unused_parameters=args.find_unused_parameters)
         model_without_ddp = model.module
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print('number of params:', n_parameters)
@@ -407,7 +414,17 @@ def main(args):
     if args.eval:
         test_stats = evaluate(data_loader_val, model, device)
         print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
-        return
+        if args.output_dir and utils.is_main_process():
+            with (output_dir / "results.json").open("a") as f:
+                f.write(json.dumps({
+                    'model': args.model,
+                    'resume': args.resume,
+                    'data_set': args.data_set,
+                    'data_path': args.data_path,
+                    'num_samples': len(dataset_val),
+                    **test_stats
+                }) + "\n")
+        exit(0)
 
     print(f"Start training for {args.epochs} epochs")
     start_time = time.time()
@@ -433,7 +450,7 @@ def main(args):
                     'optimizer': optimizer.state_dict(),
                     'lr_scheduler': lr_scheduler.state_dict(),
                     'epoch': epoch,
-                    'model_ema': get_state_dict(model_ema),
+                    'model_ema': get_state_dict(model_ema) if args.model_ema else {},
                     'scaler': loss_scaler.state_dict(),
                     'args': args,
                 }, checkpoint_path)
@@ -452,7 +469,7 @@ def main(args):
                         'optimizer': optimizer.state_dict(),
                         'lr_scheduler': lr_scheduler.state_dict(),
                         'epoch': epoch,
-                        'model_ema': get_state_dict(model_ema),
+                        'model_ema': get_state_dict(model_ema) if args.model_ema else {},
                         'scaler': loss_scaler.state_dict(),
                         'args': args,
                     }, checkpoint_path)
@@ -468,7 +485,7 @@ def main(args):
         
         
         if args.output_dir and utils.is_main_process():
-            with (output_dir / "log.txt").open("a") as f:
+            with (output_dir / "metrics.json").open("a") as f:
                 f.write(json.dumps(log_stats) + "\n")
 
     total_time = time.time() - start_time
